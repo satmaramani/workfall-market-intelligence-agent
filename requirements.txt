@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic
+httpx
+langchain
+openai
+psycopg[binary]
+pytest
+pytest-asyncio
