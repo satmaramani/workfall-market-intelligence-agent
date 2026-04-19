@@ -59,11 +59,18 @@ copy .env.example .env
 - `OPENAI_API_KEY`
 - `DATABASE_URL`
 - `INVENTORY_BASE_URL`
+- optional `LANGSMITH_TRACING`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT`, `LANGSMITH_ENDPOINT`, `LANGSMITH_WORKSPACE_ID`
+- optional `MARKET_CACHE_ENABLED`, `MARKET_CACHE_TTL_MINUTES`, `MARKET_CACHE_ALLOW_STALE_FALLBACK`
 
 Example:
 
 ```env
 DATABASE_URL=postgresql://workfall:workfall@localhost:5432/workfall_multi_agent
+LANGSMITH_TRACING=false
+LANGSMITH_PROJECT=workfall-sam-mvp-project
+MARKET_CACHE_ENABLED=true
+MARKET_CACHE_TTL_MINUTES=60
+MARKET_CACHE_ALLOW_STALE_FALLBACK=true
 ```
 
 ## Install
@@ -87,6 +94,9 @@ uvicorn app.main:app --reload --port 8003
 - `GET /api/v1/capabilities`
 - `GET /api/v1/insights/{product_id}`
 - `GET /api/v1/insights/{product_id}/history`
+- `GET /api/v1/cache/market`
+- `DELETE /api/v1/cache/market`
+- `DELETE /api/v1/cache/market/{product_id}`
 - `POST /api/v1/a2a/request`
 
 ## Repo Structure
@@ -111,3 +121,6 @@ market-intelligence-agent/
 - citations are normalized, deduplicated, and capped
 - recommended prices are sanity-validated against market/history anchors
 - historical analyses are reused as an internal research source
+- fresh market analysis is cached in PostgreSQL by product id with a configurable TTL
+- the first request for a new product goes live; later requests can be served from cache until the TTL expires
+- if `LANGSMITH_TRACING=true`, direct OpenAI market-analysis calls are wrapped and traced into LangSmith

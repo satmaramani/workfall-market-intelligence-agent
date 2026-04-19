@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 from decimal import Decimal
+from datetime import datetime
 
 import psycopg
 from fastapi import HTTPException, status
@@ -11,6 +12,8 @@ from psycopg.types.json import Jsonb
 from app.core.config import DATABASE_URL, SERVICE_NAME
 from app.core.utils import now_iso
 from app.schemas.common import A2AContext
+
+
 def get_connection() -> psycopg.Connection[Any]:
     try:
         return psycopg.connect(DATABASE_URL, row_factory=dict_row)
@@ -188,3 +191,60 @@ def fetch_recent_analyses(product_id: str, limit: int = 3) -> list[dict[str, Any
             }
         )
     return analyses
+
+
+def fetch_latest_analysis(product_id: str) -> dict[str, Any] | None:
+    analyses = fetch_recent_analyses(product_id, limit=1)
+    return analyses[0] if analyses else None
+
+
+def list_latest_cache_entries(limit: int = 100) -> list[dict[str, Any]]:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (product_id)
+                       analysis_id, product_id, product_name, trend, demand_signal, pricing_opportunity,
+                       recommended_price, competitor_prices, summary, citations, created_at
+                FROM market_analyses
+                ORDER BY product_id, created_at DESC
+                LIMIT %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+
+    entries = []
+    for row in rows:
+        entries.append(
+            {
+                "analysis_id": row["analysis_id"],
+                "product_id": row["product_id"],
+                "product_name": row["product_name"],
+                "trend": row["trend"],
+                "demand_signal": row["demand_signal"],
+                "pricing_opportunity": row["pricing_opportunity"],
+                "recommended_price": float(row["recommended_price"])
+                if isinstance(row["recommended_price"], Decimal)
+                else row["recommended_price"],
+                "competitor_prices": row["competitor_prices"],
+                "summary": row["summary"],
+                "citations": row["citations"],
+                "created_at": row["created_at"].isoformat()
+                if isinstance(row["created_at"], datetime)
+                else row["created_at"],
+            }
+        )
+    return entries
+
+
+def clear_market_cache(product_id: str | None = None) -> int:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            if product_id:
+                cur.execute("DELETE FROM market_analyses WHERE product_id = %s", (product_id,))
+            else:
+                cur.execute("DELETE FROM market_analyses")
+            deleted_rows = cur.rowcount
+        conn.commit()
+    return deleted_rows

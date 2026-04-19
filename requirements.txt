@@ -4,6 +4,7 @@ pydantic
 python-dotenv
 httpx
 langchain
+langsmith
 openai
 psycopg[binary]
 pytest

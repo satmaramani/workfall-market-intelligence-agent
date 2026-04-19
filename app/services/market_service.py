@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import HTTPException, status
@@ -11,8 +12,12 @@ from app.core.config import (
     OPENAI_MARKET_MODEL,
     OPENAI_MARKET_REASONING_EFFORT,
     OPENAI_WEB_SEARCH_ENABLED,
+    MARKET_CACHE_ALLOW_STALE_FALLBACK,
+    MARKET_CACHE_ENABLED,
+    MARKET_CACHE_TTL_MINUTES,
 )
-from app.core.db import fetch_recent_analyses, persist_analysis, record_trace
+from app.core.db import fetch_latest_analysis, fetch_recent_analyses, persist_analysis, record_trace
+from app.core.langsmith_utils import maybe_wrap_openai
 from app.core.utils import now_iso
 from app.schemas.market import MarketInsight
 
@@ -26,7 +31,7 @@ def get_openai_client() -> OpenAI:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="OPENAI_API_KEY is not configured for Market Intelligence",
         )
-    return OpenAI(api_key=OPENAI_API_KEY)
+    return maybe_wrap_openai(OpenAI(api_key=OPENAI_API_KEY))
 
 
 def normalize_url(url: str) -> str:
@@ -134,9 +139,108 @@ def validate_recommended_price(
     return round(bounded_price, 2)
 
 
-async def analyze_market(product_id: str, context=None) -> dict:
+def _parse_iso_datetime(value: str) -> datetime:
+    normalized = value.replace("Z", "+00:00")
+    return datetime.fromisoformat(normalized)
+
+
+def _build_cache_metadata(
+    *,
+    latest_analysis: dict | None,
+    force_refresh: bool,
+    source: str,
+) -> dict:
+    if not latest_analysis:
+        return {
+            "enabled": MARKET_CACHE_ENABLED,
+            "ttl_minutes": MARKET_CACHE_TTL_MINUTES,
+            "source": source,
+            "force_refresh": force_refresh,
+            "cached_at": None,
+            "cache_age_minutes": None,
+            "cache_expires_at": None,
+            "is_stale": False,
+        }
+
+    cached_at = _parse_iso_datetime(latest_analysis["created_at"])
+    age_minutes = round((datetime.now(timezone.utc) - cached_at).total_seconds() / 60, 2)
+    expires_at = cached_at + timedelta(minutes=MARKET_CACHE_TTL_MINUTES)
+    is_stale = datetime.now(timezone.utc) > expires_at
+    return {
+        "enabled": MARKET_CACHE_ENABLED,
+        "ttl_minutes": MARKET_CACHE_TTL_MINUTES,
+        "source": source,
+        "force_refresh": force_refresh,
+        "cached_at": cached_at.isoformat(),
+        "cache_age_minutes": age_minutes,
+        "cache_expires_at": expires_at.isoformat(),
+        "is_stale": is_stale,
+    }
+
+
+def _build_cached_result(
+    *,
+    product: dict,
+    latest_analysis: dict,
+    recent_analyses: list[dict],
+    source: str,
+    force_refresh: bool,
+) -> dict:
+    return {
+        "product_id": product["product_id"],
+        "product_name": product["product_name"],
+        "category": product["category"],
+        "current_unit_price": product["unit_price"],
+        "trend": latest_analysis["trend"],
+        "demand_signal": latest_analysis["demand_signal"],
+        "pricing_opportunity": latest_analysis["pricing_opportunity"],
+        "recommended_price": latest_analysis["recommended_price"],
+        "competitor_prices": latest_analysis["competitor_prices"],
+        "summary": latest_analysis["summary"],
+        "citations": latest_analysis["citations"],
+        "internal_research_context": {
+            "historical_analysis_count": len(recent_analyses),
+            "recent_analyses": summarize_internal_history(recent_analyses),
+        },
+        "cache": _build_cache_metadata(
+            latest_analysis=latest_analysis,
+            force_refresh=force_refresh,
+            source=source,
+        ),
+        "generated_at": now_iso(),
+    }
+
+
+def _is_cache_fresh(latest_analysis: dict | None) -> bool:
+    if not latest_analysis:
+        return False
+    cached_at = _parse_iso_datetime(latest_analysis["created_at"])
+    return datetime.now(timezone.utc) <= cached_at + timedelta(minutes=MARKET_CACHE_TTL_MINUTES)
+
+
+async def analyze_market(product_id: str, context=None, force_refresh: bool = False) -> dict:
     product = await fetch_product_details(product_id)
     recent_analyses = fetch_recent_analyses(product_id)
+    latest_analysis = fetch_latest_analysis(product_id)
+
+    if MARKET_CACHE_ENABLED and not force_refresh and _is_cache_fresh(latest_analysis):
+        cached_result = _build_cached_result(
+            product=product,
+            latest_analysis=latest_analysis,
+            recent_analyses=recent_analyses,
+            source="cache_hit",
+            force_refresh=force_refresh,
+        )
+        record_trace(
+            context=context,
+            step_name="market_cache_hit",
+            step_type="cache_read",
+            status="success",
+            input_payload={"product_id": product_id, "force_refresh": force_refresh},
+            output_payload=cached_result,
+        )
+        return cached_result
+
     client = get_openai_client()
 
     tools = []
@@ -171,71 +275,98 @@ async def analyze_market(product_id: str, context=None) -> dict:
             "Keep the summary compact for dashboard display."
         ),
     }
-    response = client.responses.parse(
-        model=OPENAI_MARKET_MODEL,
-        reasoning={"effort": OPENAI_MARKET_REASONING_EFFORT},
-        tools=tools,
-        include=include,
-        input=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": str(user_prompt)},
-        ],
-        text_format=MarketInsight,
-    )
-    parsed = getattr(response, "output_parsed", None)
-    if parsed is None:
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="OpenAI could not generate a structured market analysis",
+    try:
+        response = client.responses.parse(
+            model=OPENAI_MARKET_MODEL,
+            reasoning={"effort": OPENAI_MARKET_REASONING_EFFORT},
+            tools=tools,
+            include=include,
+            input=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": str(user_prompt)},
+            ],
+            text_format=MarketInsight,
         )
-    usage = getattr(response, "usage", None)
-    citations = extract_sources(response)
-    competitor_prices = validate_competitor_prices(parsed.competitor_prices)
-    recommended_price = validate_recommended_price(
-        parsed.recommended_price,
-        float(product["unit_price"]),
-        competitor_prices,
-        recent_analyses,
-    )
-    persist_analysis(
-        product["product_id"],
-        product["product_name"],
-        trend=parsed.trend,
-        demand_signal=parsed.demand_signal,
-        pricing_opportunity=parsed.pricing_opportunity,
-        recommended_price=recommended_price,
-        competitor_prices=competitor_prices,
-        summary=parsed.summary,
-        citations=citations,
-    )
-    result = {
-        "product_id": product["product_id"],
-        "product_name": product["product_name"],
-        "category": product["category"],
-        "current_unit_price": product["unit_price"],
-        "trend": parsed.trend,
-        "demand_signal": parsed.demand_signal,
-        "pricing_opportunity": parsed.pricing_opportunity,
-        "recommended_price": recommended_price,
-        "competitor_prices": competitor_prices,
-        "summary": parsed.summary,
-        "citations": citations,
-        "internal_research_context": {
-            "historical_analysis_count": len(recent_analyses),
-            "recent_analyses": summarize_internal_history(recent_analyses),
-        },
-        "generated_at": now_iso(),
-    }
-    record_trace(
-        context=context,
-        step_name="market_openai_analysis",
-        step_type="ai_call",
-        status="success",
-        input_payload=user_prompt,
-        output_payload=result,
-        model_name=OPENAI_MARKET_MODEL,
-        prompt_tokens=getattr(usage, "input_tokens", None) if usage else None,
-        completion_tokens=getattr(usage, "output_tokens", None) if usage else None,
-        total_tokens=getattr(usage, "total_tokens", None) if usage else None,
-    )
-    return result
+        parsed = getattr(response, "output_parsed", None)
+        if parsed is None:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="OpenAI could not generate a structured market analysis",
+            )
+        usage = getattr(response, "usage", None)
+        citations = extract_sources(response)
+        competitor_prices = validate_competitor_prices(parsed.competitor_prices)
+        recommended_price = validate_recommended_price(
+            parsed.recommended_price,
+            float(product["unit_price"]),
+            competitor_prices,
+            recent_analyses,
+        )
+        persist_analysis(
+            product["product_id"],
+            product["product_name"],
+            trend=parsed.trend,
+            demand_signal=parsed.demand_signal,
+            pricing_opportunity=parsed.pricing_opportunity,
+            recommended_price=recommended_price,
+            competitor_prices=competitor_prices,
+            summary=parsed.summary,
+            citations=citations,
+        )
+        refreshed_analyses = fetch_recent_analyses(product_id)
+        result = {
+            "product_id": product["product_id"],
+            "product_name": product["product_name"],
+            "category": product["category"],
+            "current_unit_price": product["unit_price"],
+            "trend": parsed.trend,
+            "demand_signal": parsed.demand_signal,
+            "pricing_opportunity": parsed.pricing_opportunity,
+            "recommended_price": recommended_price,
+            "competitor_prices": competitor_prices,
+            "summary": parsed.summary,
+            "citations": citations,
+            "internal_research_context": {
+                "historical_analysis_count": len(refreshed_analyses),
+                "recent_analyses": summarize_internal_history(refreshed_analyses),
+            },
+            "cache": _build_cache_metadata(
+                latest_analysis=fetch_latest_analysis(product_id),
+                force_refresh=force_refresh,
+                source="live_analysis",
+            ),
+            "generated_at": now_iso(),
+        }
+        record_trace(
+            context=context,
+            step_name="market_openai_analysis",
+            step_type="ai_call",
+            status="success",
+            input_payload={**user_prompt, "force_refresh": force_refresh},
+            output_payload=result,
+            model_name=OPENAI_MARKET_MODEL,
+            prompt_tokens=getattr(usage, "input_tokens", None) if usage else None,
+            completion_tokens=getattr(usage, "output_tokens", None) if usage else None,
+            total_tokens=getattr(usage, "total_tokens", None) if usage else None,
+        )
+        return result
+    except Exception as exc:
+        if MARKET_CACHE_ENABLED and MARKET_CACHE_ALLOW_STALE_FALLBACK and latest_analysis:
+            stale_result = _build_cached_result(
+                product=product,
+                latest_analysis=latest_analysis,
+                recent_analyses=recent_analyses,
+                source="stale_cache_fallback",
+                force_refresh=force_refresh,
+            )
+            record_trace(
+                context=context,
+                step_name="market_cache_stale_fallback",
+                step_type="cache_fallback",
+                status="success",
+                input_payload={"product_id": product_id, "force_refresh": force_refresh},
+                output_payload=stale_result,
+                error_message=str(getattr(exc, "detail", exc)),
+            )
+            return stale_result
+        raise
