@@ -3,6 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Header, HTTPException
 
 from app.core.config import OPENAI_API_KEY, OPENAI_MARKET_MODEL, OPENAI_WEB_SEARCH_ENABLED, SERVICE_NAME, SERVICE_PORT
+from app.core.db import fetch_recent_analyses
 from app.core.security import require_agent_token
 from app.core.utils import now_iso
 from app.schemas.common import A2AError, A2AMeta, A2ARequest, A2AResponse
@@ -36,6 +37,14 @@ def capabilities() -> dict:
 @router.get("/insights/{product_id}")
 async def get_insight(product_id: str) -> dict:
     return await analyze_market(product_id)
+
+
+@router.get("/insights/{product_id}/history")
+def get_insight_history(product_id: str, limit: int = 5) -> dict:
+    return {
+        "product_id": product_id,
+        "analyses": fetch_recent_analyses(product_id, limit=min(max(limit, 1), 20)),
+    }
 
 
 @router.post("/a2a/request", response_model=A2AResponse)
