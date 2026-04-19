@@ -1,35 +1,83 @@
 # Market Intelligence Agent
 
-Market research and pricing insight service for the multi-agent e-commerce system.
+Market research and pricing guidance service for the multi-agent e-commerce system.
 
-## Responsibilities
+## What This Service Does
 
-- analyze market and competitor pricing signals
-- identify demand signals and pricing opportunities
-- use OpenAI Responses API with web search for external-source research workflows
-- return structured insights for invoice and concierge flows
-- persist analysis history in PostgreSQL
+- performs external market research using OpenAI with web search
+- uses internal context from Inventory and prior persisted market analyses
+- analyzes competitor pricing and market trends
+- identifies demand signals and pricing opportunities
+- returns structured pricing guidance for Concierge and Invoice workflows
+- persists market analysis history in PostgreSQL
 
 ## Default Port
 
 `8003`
 
-## Local Run Target
+## Local Base URL
 
 `http://localhost:8003`
 
-## Planned Dependencies
+## Depends On
+
+- `inventory-agent` on `8001`
+- PostgreSQL on `5432`
+- OpenAI API key
+
+## PostgreSQL Requirement
+
+This service expects PostgreSQL to already be running before startup.
+
+Recommended local database settings:
+
+- host: `localhost`
+- port: `5432`
+- database: `workfall_multi_agent`
+- user: `workfall`
+- password: `workfall`
+
+Tables are created automatically on startup. You do not need to manually create Market Intelligence tables if the configured database is reachable and the user has permission to create tables.
+
+## Tech Used Here
 
 - FastAPI
-- Uvicorn
-- Pydantic
-- httpx
-- LangChain
-- optional transformers, vector DB, and RAG tooling
+- OpenAI Python SDK
+- PostgreSQL via `psycopg`
+- lightweight LangChain-aligned LLM service structure
+
+## Environment Setup
+
+1. Copy the example file:
+
+```powershell
+copy .env.example .env
+```
+
+2. Update values if needed, especially:
+
+- `OPENAI_API_KEY`
+- `DATABASE_URL`
+- `INVENTORY_BASE_URL`
+
+Example:
+
+```env
+DATABASE_URL=postgresql://workfall:workfall@localhost:5432/workfall_multi_agent
+```
+
+## Install
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+```
 
 ## Run Locally
 
-```bash
+```powershell
 uvicorn app.main:app --reload --port 8003
 ```
 
@@ -38,9 +86,10 @@ uvicorn app.main:app --reload --port 8003
 - `GET /api/v1/health`
 - `GET /api/v1/capabilities`
 - `GET /api/v1/insights/{product_id}`
+- `GET /api/v1/insights/{product_id}/history`
 - `POST /api/v1/a2a/request`
 
-## Repo Layout
+## Repo Structure
 
 ```text
 market-intelligence-agent/
@@ -48,14 +97,17 @@ market-intelligence-agent/
     api/
     clients/
     core/
-    models/
     schemas/
     services/
-    agents/
-    graphs/
   tests/
   .env.example
   requirements.txt
   .gitignore
   README.md
 ```
+
+## Notes
+
+- citations are normalized, deduplicated, and capped
+- recommended prices are sanity-validated against market/history anchors
+- historical analyses are reused as an internal research source

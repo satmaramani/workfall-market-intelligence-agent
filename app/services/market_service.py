@@ -197,7 +197,17 @@ async def analyze_market(product_id: str, context=None) -> dict:
         competitor_prices,
         recent_analyses,
     )
-    persist_analysis(product["product_id"], product["product_name"], parsed, citations)
+    persist_analysis(
+        product["product_id"],
+        product["product_name"],
+        trend=parsed.trend,
+        demand_signal=parsed.demand_signal,
+        pricing_opportunity=parsed.pricing_opportunity,
+        recommended_price=recommended_price,
+        competitor_prices=competitor_prices,
+        summary=parsed.summary,
+        citations=citations,
+    )
     result = {
         "product_id": product["product_id"],
         "product_name": product["product_name"],

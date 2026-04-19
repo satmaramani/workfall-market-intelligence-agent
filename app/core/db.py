@@ -11,9 +11,6 @@ from psycopg.types.json import Jsonb
 from app.core.config import DATABASE_URL, SERVICE_NAME
 from app.core.utils import now_iso
 from app.schemas.common import A2AContext
-from app.schemas.market import MarketInsight
-
-
 def get_connection() -> psycopg.Connection[Any]:
     try:
         return psycopg.connect(DATABASE_URL, row_factory=dict_row)
@@ -114,7 +111,18 @@ def record_trace(
         conn.commit()
 
 
-def persist_analysis(product_id: str, product_name: str, insight: MarketInsight, citations: list[dict[str, str]]) -> None:
+def persist_analysis(
+    product_id: str,
+    product_name: str,
+    *,
+    trend: str,
+    demand_signal: str,
+    pricing_opportunity: str,
+    recommended_price: float,
+    competitor_prices: list[dict[str, Any]],
+    summary: str,
+    citations: list[dict[str, str]],
+) -> None:
     from uuid import uuid4
 
     with get_connection() as conn:
@@ -131,12 +139,12 @@ def persist_analysis(product_id: str, product_name: str, insight: MarketInsight,
                     str(uuid4()),
                     product_id,
                     product_name,
-                    insight.trend,
-                    insight.demand_signal,
-                    insight.pricing_opportunity,
-                    insight.recommended_price,
-                    Jsonb([item.model_dump() for item in insight.competitor_prices]),
-                    insight.summary,
+                    trend,
+                    demand_signal,
+                    pricing_opportunity,
+                    recommended_price,
+                    Jsonb(competitor_prices),
+                    summary,
                     Jsonb(citations),
                     now_iso(),
                 ),

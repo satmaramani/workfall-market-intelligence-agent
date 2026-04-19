@@ -16,13 +16,15 @@ router = APIRouter(prefix="/api/v1")
 @router.get("/health")
 def health() -> dict:
     from app.main import app
+    db_available = app.state.db_available
+    openai_configured = bool(OPENAI_API_KEY)
 
     return {
-        "status": "ok",
+        "status": "ok" if db_available and openai_configured else "degraded",
         "service": SERVICE_NAME,
         "port": SERVICE_PORT,
-        "db_available": app.state.db_available,
-        "openai_configured": bool(OPENAI_API_KEY),
+        "db_available": db_available,
+        "openai_configured": openai_configured,
         "model": OPENAI_MARKET_MODEL,
         "web_search_enabled": OPENAI_WEB_SEARCH_ENABLED,
         "timestamp": now_iso(),
