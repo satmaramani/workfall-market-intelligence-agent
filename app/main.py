@@ -10,6 +10,7 @@ from app.core.db import init_db
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Market Intelligence needs its own schema ready before it can store analyses or cache entries.
     try:
         init_db()
         app.state.db_available = True
